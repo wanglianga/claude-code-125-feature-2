@@ -31,12 +31,12 @@ export default function DistributionsPage() {
           <thead><tr><th>场次</th><th>类型</th><th>计划</th><th>班级</th><th>时间</th><th>地点</th><th>状态</th><th>发放/签收</th><th>未闭环异常</th><th></th></tr></thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.id}>
-                <td>{r.name}</td>
+              <tr key={r.id} style={r.frozen ? { background: '#fff8f8' } : undefined}>
+                <td>{r.name}{r.frozen ? <span className="tag-chip" style={{ marginLeft: 6 }}>已冻结</span> : null}</td>
                 <td><Badge status={r.kind} /></td>
                 <td>{plans.find((p) => p.id === r.plan_id)?.name}</td>
                 <td>{r.campus_name} {r.class_name}</td><td>{r.scheduled_at}</td><td>{r.location}</td>
-                <td><Badge status={r.status} /></td>
+                <td><Badge status={r.status} />{r.frozen && <div className="muted" style={{ fontSize: 11, color: 'var(--red)' }}>{r.freeze_reason}</div>}</td>
                 <td>{r.issued}/{r.signed_cnt}</td>
                 <td>{r.open_issues > 0 ? <Badge status="wrong_claim" /> : <span className="muted">—</span>}</td>
                 <td><Link className="btn secondary sm" href={`/distributions/${r.id}`}>进入发放 ›</Link></td>

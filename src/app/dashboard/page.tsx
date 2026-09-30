@@ -41,15 +41,20 @@ export default function DashboardPage() {
       <div className="card">
         <h2>按班级汇总（缴费 · 试穿）</h2>
         <table>
-          <thead><tr><th>校区</th><th>年级</th><th>班级</th><th>学生数</th><th>订单数</th><th>已缴费</th><th>待缴费/挂起</th><th>已试穿人数</th></tr></thead>
+          <thead><tr><th>校区</th><th>年级</th><th>班级</th><th>学生数</th><th>订单数</th><th>已缴费</th><th>待缴费/挂起</th><th>已试穿人数</th><th>错包冻结</th></tr></thead>
           <tbody>
             {data.classes?.map((c: any) => (
-              <tr key={c.id}>
+              <tr key={c.id} style={Number(c.frozen_dists) > 0 ? { background: '#fff8f8' } : undefined}>
                 <td>{c.campus_name}</td><td>{c.grade_name}</td><td>{c.class_name}</td>
                 <td>{c.students}</td><td>{c.orders}</td>
                 <td><Badge status="paid" /> {c.paid_cnt}</td>
                 <td>{Number(c.pending_cnt) > 0 ? <span style={{ color: 'var(--amber)' }}>{c.pending_cnt}</span> : 0}</td>
                 <td>{c.fitted_students}</td>
+                <td>
+                  {Number(c.frozen_dists) > 0
+                    ? <><Badge status="frozen" /> {c.frozen_dists} 场{c.open_wrongpack > 0 ? `（待补 ${c.open_wrongpack} 件）` : ''}</>
+                    : (Number(c.open_wrongpack) > 0 ? <span style={{ color: 'var(--amber)' }}>待补 {c.open_wrongpack} 件</span> : <span className="muted">正常</span>)}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -61,7 +66,7 @@ export default function DashboardPage() {
         <table>
           <thead><tr>
             <th>学号</th><th>学生</th><th>班级</th><th>在校状态</th><th>订单</th>
-            <th>缴费</th><th>试穿</th><th>已投产(件)</th><th>已签收(件)</th><th>进行中售后</th>
+            <th>缴费</th><th>试穿</th><th>已投产(件)</th><th>已签收(件)</th><th>进行中售后</th><th>错包状态</th>
           </tr></thead>
           <tbody>
             {s.map((x: any) => (
@@ -81,6 +86,7 @@ export default function DashboardPage() {
                 <td>{x.producing_qty}</td>
                 <td>{x.signed_qty}</td>
                 <td>{x.open_cases > 0 ? <Badge status="open" /> : <span className="muted">—</span>}</td>
+                <td>{Number(x.open_wrongpack) > 0 ? <Badge status="resending" /> : Number(x.closed_wrongpack) > 0 ? <Badge status="closed" /> : <span className="muted">—</span>}</td>
               </tr>
             ))}
           </tbody>

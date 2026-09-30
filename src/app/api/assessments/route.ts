@@ -20,7 +20,7 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
 // 总务对供应商考核：系统自动统计漏发/延期/过敏/换码数量，也可手工调整
 export const POST = api(async (_req: NextRequest, body: any, user) => {
   if (!body.supplier_id || !body.period || body.score === undefined) return fail('供应商、周期、分数必填');
-  let stats: any = { missing_count: 0, delay_count: 0, allergy_count: 0, exchange_count: 0 };
+  let stats: any = { missing_count: 0, delay_count: 0, allergy_count: 0, exchange_count: 0, wrongpack_count: 0, wrongpack_delay_count: 0 };
   if (body.plan_id) {
     stats = await one<any>(
       `SELECT
@@ -36,16 +36,19 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
            WHERE o.plan_id=? AND ac.reason='allergy') allergy_count,
          (SELECT COUNT(*) FROM aftersales_cases ac
             JOIN orders o ON o.id=ac.order_id
-           WHERE o.plan_id=? AND ac.type='exchange') exchange_count`,
-      [body.plan_id, body.plan_id, body.plan_id, body.plan_id]);
+           WHERE o.plan_id=? AND ac.type='exchange') exchange_count,
+         (SELECT COUNT(*) FROM wrong_pack_cases WHERE plan_id=?) wrongpack_count,
+         (SELECT COUNT(*) FROM wrong_pack_cases WHERE plan_id=? AND resend_overdue=1) wrongpack_delay_count`,
+      [body.plan_id, body.plan_id, body.plan_id, body.plan_id, body.plan_id, body.plan_id]);
   }
   const r = await query(
-    `INSERT INTO supplier_assessments (supplier_id,plan_id,period,score,missing_count,delay_count,allergy_count,exchange_count,note,assessed_by)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO supplier_assessments (supplier_id,plan_id,period,score,missing_count,delay_count,allergy_count,exchange_count,wrongpack_count,wrongpack_delay_count,note,assessed_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     [body.supplier_id, body.plan_id || null, body.period, body.score,
      body.missing_count ?? stats.missing_count, body.delay_count ?? stats.delay_count,
      body.allergy_count ?? stats.allergy_count, body.exchange_count ?? stats.exchange_count,
+     body.wrongpack_count ?? stats.wrongpack_count, body.wrongpack_delay_count ?? stats.wrongpack_delay_count,
      body.note || null, user.id]);
-  await logActivity({ actor: user, action: '供应商考核', detail: `供应商#${body.supplier_id} 评分 ${body.score}` });
+  await logActivity({ actor: user, action: '供应商考核', detail: `供应商#${body.supplier_id} 评分 ${body.score}，错包 ${body.wrongpack_count ?? stats.wrongpack_count} 起、超时 ${body.wrongpack_delay_count ?? stats.wrongpack_delay_count} 起` });
   return ok({ id: (r as any).insertId, stats });
 }, ['general_affairs', 'admin']);

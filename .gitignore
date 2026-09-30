@@ -33,3 +33,4 @@ temp/
 *debug*
 *temp*
 *tmp*
+*.tsbuildinfo

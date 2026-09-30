@@ -272,6 +272,144 @@ const find = (arr, pred) => { const r = arr.find(pred); if (!r) throw new Error(
   const classRow = find(r.classes, (x) => x.class_name === '一(1)班');
   check('班级汇总存在', classRow.students >= 4);
 
+  // 12. 错包处理与批次可追溯
+  console.log('⑫ 错包混装：定位/冻结/分拣/审核/双签闭环/超时追责');
+  await login('zw');
+  // 12.1 种子已生成超时工单，首次打开错包列表自动巡检 → 生成追责单+替代调拨建议
+  r = await req('GET', '/api/wrong-packs');
+  const overdueCase = find(r.cases, (c) => c.case_no === 'WP20260002');
+  check('超时工单被巡检标记', overdueCase.resend_overdue === 1, JSON.stringify(overdueCase));
+  let od = await req('GET', `/api/wrong-packs/${overdueCase.id}`);
+  check('自动生成供应商追责单', od.liabilities.length >= 1 && od.liabilities[0].type === 'wrong_pack_overdue', JSON.stringify(od.liabilities));
+  check('自动给出替代调拨建议', /替代调拨/.test(od.wpc.transfer_suggestion || ''), od.wpc.transfer_suggestion);
+
+  // 12.2 待重新分拣的种子工单：供应商完成分拣+补发出校
+  const wp1 = find(r.cases, (c) => c.case_no === 'WP20260001');
+  let d1 = await req('GET', `/api/wrong-packs/${wp1.id}`);
+  check('定位4件且1件已签收自动排除', d1.items.length === 4 && d1.items.filter((x) => x.item_status === 'excluded').length === 1);
+  check('仅冻结两个相关班级发放批次', d1.freezes.length === 2 && d1.freezes.every((f) => !f.unfrozen));
+  const frozenDistIds = d1.freezes.map((f) => f.distribution_id);
+  const distList = (await req('GET', '/api/distributions')).distributions;
+  const unrelated = find(distList, (x) => x.name.includes('六(1)班'));
+  check('无关班级发放场未冻结可继续发放', unrelated.frozen === 0);
+
+  // 12.3 冻结期间相关班级不能发放/确认整批
+  const fzDist = await req('GET', `/api/distributions/${frozenDistIds[0]}`);
+  let wpBlocked = false;
+  try {
+    await req('POST', `/api/distributions/${frozenDistIds[0]}`, { distribution_id: frozenDistIds[0], action: 'set_status', status: 'done' });
+  } catch { wpBlocked = true; }
+  check('冻结期间不能确认整批发放', wpBlocked);
+
+  // 12.4 供应商重新分拣（已审核优先补发，需登记操作人/原包去向/补发单号/预计到校）
+  await login('gys');
+  await req('POST', `/api/wrong-packs/${wp1.id}`, {
+    id: wp1.id, action: 'repack', operator: '仓库分拣 王军',
+    original_pack_destination: '退回供应商仓库重新分拣', remark: 'E2E重新分拣',
+    resend_tracking_no: 'RS-E2E-01', resend_expected_arrival: '2026-10-25',
+  });
+  d1 = await req('GET', `/api/wrong-packs/${wp1.id}`);
+  check('分拣登记后进入补发中', d1.wpc.status === 'resending' && d1.wpc.resend_tracking_no === 'RS-E2E-01');
+  check('分拣四要素已留痕', d1.wpc.repack_operator && d1.wpc.original_pack_destination && d1.wpc.resend_expected_arrival === '2026-10-25');
+
+  // 缺字段应被拦截
+  let repackErr = '';
+  try { await req('POST', `/api/wrong-packs/${wp1.id}`, { id: wp1.id, action: 'repack', operator: '' }); } catch (e) { repackErr = e.message; }
+  check('分拣必须登记操作人与原包去向', /操作人|原包去向/.test(repackErr), repackErr);
+
+  // 12.5 总务确认到校 → 学生签收 + 班主任复核双签闭环
+  await login('zw');
+  await req('POST', `/api/wrong-packs/${wp1.id}`, { id: wp1.id, action: 'resend_arrive' });
+  d1 = await req('GET', `/api/wrong-packs/${wp1.id}`);
+  const pending = d1.items.filter((x) => x.item_status !== 'excluded');
+  // 家长角色不能代签
+  await login('chen_ma');
+  let noSign = false;
+  try { await req('POST', `/api/wrong-packs/${wp1.id}`, { id: wp1.id, action: 'student_sign', item_id: pending[0].id }); } catch { noSign = true; }
+  check('家长不能直接登记错包签收', noSign);
+
+  // 班主任逐件学生签收（按班级切换班主任：一(1)班王老师 / 二(1)班赵老师）
+  const signLogin = async (className) => login(className.includes('一(1)') ? 'wangls' : 'zhaols');
+  for (const it of pending) {
+    await signLogin(it.class_name);
+    await req('POST', `/api/wrong-packs/${wp1.id}`, { id: wp1.id, action: 'student_sign', item_id: it.id, signed_by: `${it.student_name}家长` });
+  }
+  // 未复核前不能闭环
+  let earlyClose = false;
+  await login('zw');
+  try { await req('POST', `/api/wrong-packs/${wp1.id}`, { id: wp1.id, action: 'close' }); } catch { earlyClose = true; }
+  check('缺班主任复核不能闭环', earlyClose);
+  for (const it of pending) {
+    await signLogin(it.class_name);
+    await req('POST', `/api/wrong-packs/${wp1.id}`, { id: wp1.id, action: 'teacher_review', item_id: it.id });
+  }
+  await login('zw');
+  d1 = await req('GET', `/api/wrong-packs/${wp1.id}`);
+  check('双签完成自动闭环', d1.wpc.status === 'closed' && d1.wpc.closed_at);
+  check('闭环后相关发放批次全部解冻', d1.freezes.every((f) => f.unfrozen === 1));
+  const fd1 = await req('GET', `/api/distributions/${frozenDistIds[0]}`);
+  check('发放场#1（一(1)班）已解冻可继续发放', fd1.distribution.frozen === 0);
+  // 二(1)班发放场同时被另一起未闭环错包 WP20260002 冻结，WP20260001 闭环不能解除其他工单的冻结（精确到批次而非整校）
+  const fd2 = await req('GET', `/api/distributions/${frozenDistIds[1]}`);
+  check('发放场#2 因另一起错包未闭环仍冻结（非整校停发）', fd2.distribution.frozen === 1);
+  check('补发件写入签收记录且已闭环', d1.items.filter((x) => x.item_status !== 'excluded').length === 3
+    && d1.items.filter((x) => x.student_signed_at && x.teacher_reviewed_at).length >= 3);
+
+  // 12.6 重复签收被拦截（防重复发放）
+  const oneItem = pending[0];
+  await signLogin(oneItem.class_name);
+  let dupSign = false;
+  try { await req('POST', `/api/wrong-packs/${wp1.id}`, { id: wp1.id, action: 'student_sign', item_id: oneItem.id }); } catch { dupSign = true; }
+  check('已签收学生不能重复发放', dupSign);
+
+  // 12.7 包装码重复扫描识别（PK-MD-1001 种子里已有两次扫描）
+  await login('wangls');
+  const packs = (await req('GET', '/api/pack-codes')).packs;
+  const pk1 = find(packs, (p) => p.pack_code === 'PK-MD-1001');
+  const pk2 = find(packs, (p) => p.pack_code === 'PK-MD-1002');
+  const sr = await req('POST', `/api/pack-codes/${pk1.id}`, { id: pk1.id, distribution_id: null });
+  check('同一包装码再次扫描判为重复', sr.duplicate === true);
+
+  // 12.8 新登记一个错包：仅勾选重复扫描包装码，验证按包装码定位+自动冻结
+  await login('zw');
+  // 二(1)班场次仍被 WP20260002 冻结；新建一个未结束场次用于自动冻结验证
+  const c21Cls = find((await req('GET', '/api/classes')).classes, (c) => c.name === '二(1)班');
+  const newDist = (await req('POST', '/api/distributions', {
+    plan_id: p1.id, class_id: c21Cls.id, name: '二(1)班补领验证场', kind: 'supplementary',
+    scheduled_at: '2026-11-08 15:00:00', location: '二(1)班教室',
+  })).id;
+  const cr = await req('POST', '/api/wrong-packs', {
+    pack_code_ids: [pk2.id], trigger_reason: 'duplicate_scan', title: 'E2E重复扫描冻结验证',
+  });
+  // PK-MD-1002 内陈晓外套已在 WP20260001 双签时签收，应自动排除，郑好上衣仍待补
+  check('按包装码定位且已签收件自动排除', cr.affected >= 1 && cr.signed >= 1 && cr.frozen_distributions >= 1, JSON.stringify(cr));
+  const nd = await req('GET', `/api/distributions/${newDist}`);
+  check('新错包自动冻结相关班级新发放批次', nd.distribution.frozen === 1);
+
+  // 无关班级（六(1)班）发放场可正常确认整批发放
+  const c61Dist = find((await req('GET', '/api/distributions')).distributions, (x) => x.name.includes('六(1)班'));
+  await req('POST', `/api/distributions/${c61Dist.id}`, { distribution_id: c61Dist.id, action: 'set_status', status: 'in_progress' }).catch(() => {});
+  await req('POST', `/api/distributions/${c61Dist.id}`, { distribution_id: c61Dist.id, action: 'set_status', status: 'done' });
+  const c61Done = await req('GET', `/api/distributions/${c61Dist.id}`);
+  check('无关班级可正常确认整批发放', c61Done.distribution.status === 'done' && c61Done.distribution.frozen === 0);
+
+  // 12.9 供应商考核自动统计错包数与超时数
+  await req('POST', '/api/assessments', { supplier_id: 1, plan_id: p1.id, period: '2026-2027错包验证', score: 80 });
+  const assess = (await req('GET', '/api/assessments')).assessments[0];
+  check('考核自动统计错包与补发超时', Number(assess.wrongpack_count) >= 3 && Number(assess.wrongpack_delay_count) >= 1,
+    JSON.stringify({ wp: assess.wrongpack_count, d: assess.wrongpack_delay_count }));
+
+  // 12.10 看板与家长端同步
+  r = await req('GET', `/api/dashboard/progress?plan_id=${p1.id}`);
+  const c21Row = find(r.classes, (x) => x.class_name === '二(1)班');
+  check('班级看板展示冻结场/待补件', Number(c21Row.open_wrongpack) >= 1, JSON.stringify(c21Row));
+  await login('sun_ma');
+  const sunOrders = (await req('GET', '/api/orders')).orders;
+  const sunOrder = find(sunOrders, (o) => o.student_name === '孙朵朵');
+  const sunDetail = await req('GET', `/api/orders/${sunOrder.id}`);
+  check('家长端同步错包补发与追责状态', (sunDetail.wrongPacks || []).some((w) => w.case_no === 'WP20260002' && w.resend_overdue === 1),
+    JSON.stringify(sunDetail.wrongPacks));
+
   console.log(`\n结果：${pass} 通过, ${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch( (e) => { console.error('\n💥 E2E 异常中断:', e.message); process.exit(1); });

@@ -27,13 +27,15 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
   const cls = await one<any>('SELECT * FROM classes WHERE id=?', [body.class_id]);
   if (!cls) return fail('班级不存在', 404);
   const grade = await one<any>('SELECT campus_id FROM grades WHERE id=?', [cls.grade_id]);
+  const kind = body.kind === 'supplementary' ? 'supplementary' : 'regular';
   const r = await query(
     `INSERT INTO distributions (plan_id,class_id,campus_id,name,kind,scheduled_at,location,status,created_by)
      VALUES (?,?,?,?,?,?,?,?,?)`,
-    [body.plan_id, cls.id, grade.campus_id, body.name,
-     body.kind === 'supplementary' ? 'supplementary' : 'regular',
+    [body.plan_id, cls.id, grade.campus_id, body.name, kind,
      body.scheduled_at, body.location, body.status || 'planned', user.id]);
-  await logActivity({ actor: user, action: body.kind === 'supplementary' ? '安排补领' : '安排分批发放',
+  const distId = (r as any).insertId;
+
+  await logActivity({ actor: user, action: kind === 'supplementary' ? '安排补领' : '安排分批发放',
     detail: `${body.name} ${body.scheduled_at} @ ${body.location}` });
-  return ok({ id: (r as any).insertId });
+  return ok({ id: distId });
 }, ['general_affairs', 'head_teacher', 'admin']);

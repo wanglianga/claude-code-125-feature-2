@@ -26,7 +26,7 @@ export default function AssessmentsPage() {
         method: 'POST',
         body: JSON.stringify({ ...f, supplier_id: Number(f.supplier_id), plan_id: f.plan_id ? Number(f.plan_id) : null, score: Number(f.score) }),
       });
-      show(`已考核（系统统计：漏发${d.stats.missing_count} 延期${d.stats.delay_count} 过敏${d.stats.allergy_count} 换码${d.stats.exchange_count}）`);
+      show(`已考核（系统统计：漏发${d.stats.missing_count} 延期${d.stats.delay_count} 过敏${d.stats.allergy_count} 换码${d.stats.exchange_count} 错包${d.stats.wrongpack_count} 补发超时${d.stats.wrongpack_delay_count}）`);
       load();
     } catch (e: any) { show(e.message, true); }
   }
@@ -61,17 +61,19 @@ export default function AssessmentsPage() {
 
       <div className="card">
         <table>
-          <thead><tr><th>供应商</th><th>周期</th><th>关联计划</th><th>评分</th><th>漏发</th><th>延期</th><th>过敏投诉</th><th>换码</th><th>评语</th><th>考核人</th></tr></thead>
+          <thead><tr><th>供应商</th><th>周期</th><th>关联计划</th><th>评分</th><th>漏发</th><th>延期</th><th>过敏投诉</th><th>换码</th><th>错包</th><th>补发超时</th><th>评语</th><th>考核人</th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
                 <td>{r.supplier_name}</td><td>{r.period}</td><td>{plans.find((p) => p.id === r.plan_id)?.name || '—'}</td>
                 <td><b style={{ color: Number(r.score) >= 90 ? 'var(--green)' : Number(r.score) >= 75 ? 'var(--amber)' : 'var(--red)' }}>{r.score}</b></td>
                 <td>{r.missing_count}</td><td>{r.delay_count}</td><td>{r.allergy_count}</td><td>{r.exchange_count}</td>
+                <td>{r.wrongpack_count || 0}</td>
+                <td>{Number(r.wrongpack_delay_count) > 0 ? <span style={{ color: 'var(--red)' }}>{r.wrongpack_delay_count}</span> : 0}</td>
                 <td>{r.note}</td><td>{r.assessor_name}</td>
               </tr>
             ))}
-            {!rows.length && <tr><td colSpan={10} className="empty">暂无考核记录</td></tr>}
+            {!rows.length && <tr><td colSpan={12} className="empty">暂无考核记录</td></tr>}
           </tbody>
         </table>
       </div>

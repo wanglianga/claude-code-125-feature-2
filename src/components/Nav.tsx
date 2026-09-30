@@ -13,8 +13,10 @@ const MENUS: { roles: string[]; href: string; label: string }[] = [
   { roles: ['general_affairs', 'admin', 'head_teacher', 'parent'], href: '/orders', label: '订单缴费' },
   { roles: ['supplier', 'factory', 'admin', 'general_affairs'], href: '/batches', label: '生产批次' },
   { roles: ['supplier', 'factory', 'admin', 'general_affairs'], href: '/production-blockers', label: '投产限制' },
-  { roles: ['supplier', 'factory', 'general_affairs', 'admin'], href: '/shipments', label: '分批发货' },
+  { roles: ['supplier', 'factory', 'general_affairs', 'admin', 'head_teacher'], href: '/shipments', label: '分批发货' },
+  { roles: ['supplier', 'factory', 'general_affairs', 'admin', 'head_teacher'], href: '/packs', label: '到校包装码' },
   { roles: ['general_affairs', 'head_teacher', 'admin'], href: '/distributions', label: '分批发放' },
+  { roles: ['general_affairs', 'admin', 'head_teacher', 'parent', 'supplier', 'factory', 'after_sales'], href: '/wrong-packs', label: '错包处理' },
   { roles: ['general_affairs', 'admin', 'head_teacher', 'parent', 'supplier', 'factory', 'after_sales'], href: '/cases', label: '售后工单' },
   { roles: ['general_affairs', 'admin', 'supplier'], href: '/assessments', label: '供应商考核' },
 ];

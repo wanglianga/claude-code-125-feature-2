@@ -40,6 +40,15 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
   const dist = await one<any>('SELECT * FROM distributions WHERE id=?', [body.distribution_id]);
   if (!dist) return fail('发放场次不存在', 404);
 
+  // 错包冻结：只冻结相关发放批次，冻结期间不能发放/签收/确认整批结束（无关班级场次不受影响）
+  if (dist.frozen && ['issue', 'sign', 'set_status'].includes(body.action)) {
+    const fz = await one<any>(
+      `SELECT wpc.case_no FROM wrong_pack_freezes wpf
+       JOIN wrong_pack_cases wpc ON wpc.id=wpf.case_id
+      WHERE wpf.distribution_id=? AND wpf.unfrozen=0 LIMIT 1`, [dist.id]);
+    return fail(`本班发放批次因子包 ${fz?.case_no || ''} 已冻结，缺失包补齐并闭环后自动解冻`, 409);
+  }
+
   // 发放一件（可登记为正常/错领/漏发未到）
   if (body.action === 'issue') {
     const oi = await one<any>(
@@ -102,6 +111,15 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
   // 场次状态
   if (body.action === 'set_status') {
     if (!['planned', 'in_progress', 'done'].includes(body.status)) return fail('状态非法');
+    // 相关班级在缺失包未补齐前不能确认整批发放（无关班级可继续确认）
+    if (body.status === 'done') {
+      const open = await one<any>(
+        `SELECT wpc.case_no FROM wrong_pack_items wpi
+           JOIN wrong_pack_cases wpc ON wpc.id=wpi.case_id
+          WHERE wpi.class_id=? AND wpi.item_status<>'excluded' AND wpc.status<>'closed'
+          LIMIT 1`, [dist.class_id]);
+      if (open) return fail(`本班缺失包尚未补齐（错包 ${open.case_no} 未闭环），不能确认整批发放`, 409);
+    }
     await query('UPDATE distributions SET status=? WHERE id=?', [body.status, dist.id]);
     return ok();
   }

@@ -288,6 +288,8 @@ CREATE TABLE IF NOT EXISTS distributions (
   scheduled_at DATETIME NOT NULL,
   location VARCHAR(100) NOT NULL,
   status ENUM('planned','in_progress','done') NOT NULL DEFAULT 'planned',
+  frozen TINYINT(1) NOT NULL DEFAULT 0 COMMENT '错包冻结：仅冻结相关发放批次，无关班级可继续发放',
+  freeze_reason VARCHAR(200),
   created_by INT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX (plan_id), INDEX (class_id),
@@ -401,6 +403,8 @@ CREATE TABLE IF NOT EXISTS supplier_assessments (
   delay_count INT NOT NULL DEFAULT 0,
   allergy_count INT NOT NULL DEFAULT 0,
   exchange_count INT NOT NULL DEFAULT 0,
+  wrongpack_count INT NOT NULL DEFAULT 0 COMMENT '错包（班级混装）事件数',
+  wrongpack_delay_count INT NOT NULL DEFAULT 0 COMMENT '错包补发再次超时次数',
   note VARCHAR(500),
   assessed_by INT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -421,6 +425,186 @@ CREATE TABLE IF NOT EXISTS activity_log (
   detail VARCHAR(500),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX (student_id), INDEX (order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ===== 错包处理与批次可追溯 =====
+
+-- 包装码：供应商到校尺码包的唯一箱/袋码（同一包装码重复扫描可识别）
+CREATE TABLE IF NOT EXISTS pack_codes (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pack_code VARCHAR(40) NOT NULL UNIQUE,
+  shipment_id INT NULL COMMENT '到校发货单（到校后才能核验混装）',
+  batch_id INT NULL COMMENT '生产批次（批次可追溯）',
+  class_id INT NULL COMMENT '包装标签上的应到班级',
+  plan_id INT NULL,
+  status ENUM('shipped','arrived','scanned','mixed','frozen','repacked','closed') NOT NULL DEFAULT 'shipped',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (shipment_id), INDEX (batch_id), INDEX (class_id),
+  CONSTRAINT fk_pack_shipment FOREIGN KEY (shipment_id) REFERENCES shipments(id),
+  CONSTRAINT fk_pack_batch FOREIGN KEY (batch_id) REFERENCES production_batches(id),
+  CONSTRAINT fk_pack_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_pack_plan FOREIGN KEY (plan_id) REFERENCES plans(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 包装扫码事件：重复扫描同一包装码即在此留痕（冻结依据之一）
+CREATE TABLE IF NOT EXISTS pack_scans (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pack_code_id INT NOT NULL,
+  distribution_id INT NULL,
+  scanner_user_id INT NULL,
+  scanner_name VARCHAR(60),
+  scanned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  duplicate TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否为同一包装码的重复扫描',
+  note VARCHAR(200),
+  INDEX (pack_code_id), INDEX (distribution_id),
+  CONSTRAINT fk_ps_pack FOREIGN KEY (pack_code_id) REFERENCES pack_codes(id),
+  CONSTRAINT fk_ps_dist FOREIGN KEY (distribution_id) REFERENCES distributions(id),
+  CONSTRAINT fk_ps_user FOREIGN KEY (scanner_user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 包装明细：包装码内应装/实装的订单明细，mismatch=1 即混装（A班码里出现B班明细）
+CREATE TABLE IF NOT EXISTS pack_items (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pack_code_id INT NOT NULL,
+  order_item_id INT NOT NULL,
+  expected_class_id INT NULL COMMENT '应到班级（按订单）',
+  actual_class_id INT NULL COMMENT '包装标签班级',
+  mismatch TINYINT(1) NOT NULL DEFAULT 0 COMMENT '实装班级与包装标签班级不一致=混装',
+  INDEX (pack_code_id), INDEX (order_item_id),
+  CONSTRAINT fk_pi2_pack FOREIGN KEY (pack_code_id) REFERENCES pack_codes(id) ON DELETE CASCADE,
+  CONSTRAINT fk_pi2_oi FOREIGN KEY (order_item_id) REFERENCES order_items(id),
+  CONSTRAINT fk_pi2_exp_class FOREIGN KEY (expected_class_id) REFERENCES classes(id),
+  CONSTRAINT fk_pi2_act_class FOREIGN KEY (actual_class_id) REFERENCES classes(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 错包工单：待核对→待重新分拣→补发中→已闭环
+CREATE TABLE IF NOT EXISTS wrong_pack_cases (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  case_no VARCHAR(40) NOT NULL UNIQUE,
+  plan_id INT NOT NULL,
+  campus_id INT NOT NULL,
+  supplier_id INT NOT NULL,
+  shipment_id INT NULL,
+  batch_id INT NULL,
+  title VARCHAR(160) NOT NULL,
+  status ENUM('to_check','to_repack','resending','closed') NOT NULL DEFAULT 'to_check',
+  trigger_reason ENUM('mixed_pack','duplicate_scan','class_signoff_mismatch') NOT NULL DEFAULT 'mixed_pack',
+  description VARCHAR(500),
+  -- 总务审核受影响名单后的处置决定
+  review_decision ENUM('pending','priority_resend','defer_release') NOT NULL DEFAULT 'pending',
+  reviewed_by INT NULL,
+  reviewed_at DATETIME NULL,
+  review_note VARCHAR(300),
+  -- 重新分拣登记（供应商）
+  repack_operator VARCHAR(60) COMMENT '重新分拣操作人',
+  original_pack_destination VARCHAR(200) COMMENT '原包去向（退回供应商/改送某班/暂存）',
+  repack_remark VARCHAR(300),
+  repacked_at DATETIME NULL,
+  -- 补发物流
+  resend_tracking_no VARCHAR(80) COMMENT '补发单号',
+  resend_expected_arrival DATE COMMENT '补发预计到校时间',
+  resend_shipped_at DATETIME NULL,
+  resend_arrived_at DATETIME NULL,
+  resend_overdue TINYINT(1) NOT NULL DEFAULT 0 COMMENT '补发再次超时',
+  -- 闭环：学生实际签收 + 班主任复核（双签）
+  student_signed_by VARCHAR(60),
+  student_signed_at DATETIME NULL,
+  teacher_reviewed_by INT NULL,
+  teacher_reviewed_at DATETIME NULL,
+  -- 超时追责与替代调拨建议
+  accountability_no VARCHAR(40) COMMENT '向供应商追责单号',
+  accountability_note VARCHAR(300),
+  transfer_suggestion VARCHAR(300) COMMENT '替代调拨建议（从其他班级/校区余量调拨）',
+  closed_at DATETIME NULL,
+  created_by INT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (plan_id), INDEX (campus_id), INDEX (supplier_id), INDEX (status),
+  CONSTRAINT fk_wpc_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_wpc_campus FOREIGN KEY (campus_id) REFERENCES campuses(id),
+  CONSTRAINT fk_wpc_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+  CONSTRAINT fk_wpc_shipment FOREIGN KEY (shipment_id) REFERENCES shipments(id),
+  CONSTRAINT fk_wpc_batch FOREIGN KEY (batch_id) REFERENCES production_batches(id),
+  CONSTRAINT fk_wpc_reviewer FOREIGN KEY (reviewed_by) REFERENCES users(id),
+  CONSTRAINT fk_wpc_teacher FOREIGN KEY (teacher_reviewed_by) REFERENCES users(id),
+  CONSTRAINT fk_wpc_creator FOREIGN KEY (created_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 错包受影响学生/明细名单：逐件标注是否已签收、是否纳入冻结、补发与双签状态，避免已签收学生被重复发放
+CREATE TABLE IF NOT EXISTS wrong_pack_items (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  case_id INT NOT NULL,
+  student_id INT NOT NULL,
+  order_item_id INT NOT NULL,
+  class_id INT NOT NULL,
+  pack_code_id INT NULL,
+  already_signed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '发现错包时该生是否已签收（已签收不重复发放）',
+  item_status ENUM('affected','excluded','resending','signed','closed') NOT NULL DEFAULT 'affected',
+  exclude_reason VARCHAR(200) COMMENT '核对排除原因（如已签收/找到原包）',
+  resend_tracking_no VARCHAR(80),
+  student_signed_by VARCHAR(60),
+  student_signed_at DATETIME NULL,
+  teacher_reviewed_at DATETIME NULL,
+  INDEX (case_id), INDEX (student_id), INDEX (order_item_id),
+  UNIQUE KEY uq_wpc_oi (case_id, order_item_id),
+  CONSTRAINT fk_wpi_case FOREIGN KEY (case_id) REFERENCES wrong_pack_cases(id) ON DELETE CASCADE,
+  CONSTRAINT fk_wpi_student FOREIGN KEY (student_id) REFERENCES students(id),
+  CONSTRAINT fk_wpi_oi FOREIGN KEY (order_item_id) REFERENCES order_items(id),
+  CONSTRAINT fk_wpi_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_wpi_pack FOREIGN KEY (pack_code_id) REFERENCES pack_codes(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 被冻结的发放批次（只冻结相关班级发放场，而非整校停发）
+CREATE TABLE IF NOT EXISTS wrong_pack_freezes (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  case_id INT NOT NULL,
+  distribution_id INT NOT NULL,
+  class_id INT NOT NULL,
+  reason VARCHAR(200),
+  frozen_by INT NULL,
+  frozen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  unfrozen TINYINT(1) NOT NULL DEFAULT 0,
+  unfrozen_at DATETIME NULL,
+  UNIQUE KEY uq_case_dist (case_id, distribution_id),
+  INDEX (distribution_id),
+  CONSTRAINT fk_wpf_case FOREIGN KEY (case_id) REFERENCES wrong_pack_cases(id) ON DELETE CASCADE,
+  CONSTRAINT fk_wpf_dist FOREIGN KEY (distribution_id) REFERENCES distributions(id),
+  CONSTRAINT fk_wpf_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_wpf_user FOREIGN KEY (frozen_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 错包处置时间线（登记/冻结/分拣/审核/补发/签收/复核/追责每一步留痕，批次可追溯）
+CREATE TABLE IF NOT EXISTS wrong_pack_logs (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  case_id INT NOT NULL,
+  actor_role VARCHAR(30),
+  actor_name VARCHAR(60),
+  action VARCHAR(60),
+  detail VARCHAR(500),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (case_id),
+  CONSTRAINT fk_wpl_case FOREIGN KEY (case_id) REFERENCES wrong_pack_cases(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 错包超时追责单与替代调拨建议（补发再次超时自动生成）
+CREATE TABLE IF NOT EXISTS supplier_liabilities (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  liability_no VARCHAR(40) NOT NULL UNIQUE,
+  case_id INT NOT NULL,
+  supplier_id INT NOT NULL,
+  plan_id INT NULL,
+  type ENUM('wrong_pack_overdue','wrong_pack_mix') NOT NULL DEFAULT 'wrong_pack_overdue',
+  status ENUM('open','acknowledged','settled') NOT NULL DEFAULT 'open',
+  amount DECIMAL(10,2) NULL COMMENT '建议扣罚/赔付金额',
+  note VARCHAR(300),
+  transfer_suggestion VARCHAR(300) COMMENT '替代调拨建议',
+  created_by INT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  settled_at DATETIME NULL,
+  INDEX (case_id), INDEX (supplier_id),
+  CONSTRAINT fk_sl_case FOREIGN KEY (case_id) REFERENCES wrong_pack_cases(id),
+  CONSTRAINT fk_sl_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+  CONSTRAINT fk_sl_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_sl_user FOREIGN KEY (created_by) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 1;

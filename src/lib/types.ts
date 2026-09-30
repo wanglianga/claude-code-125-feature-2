@@ -29,12 +29,19 @@ export const STATUS_LABELS: Record<string, string> = {
   regular: '常规发放', supplementary: '补领场',
   annual: '年度统一采购', makeup: '毕业班补订',
   in_progress_d: '进行中',
+  // 错包处理
+  to_check: '待核对', to_repack: '待重新分拣', resending: '补发中', closed: '已闭环',
+  mixed: '混装', frozen: '已冻结', repacked: '已重新分拣', scanned: '已扫码',
+  priority_resend: '优先补发', defer_release: '延后发放',
+  affected: '受影响', excluded: '已排除',
+  wrong_pack_overdue: '补发超时追责', wrong_pack_mix: '混装追责',
+  acknowledged: '供应商已认责', settled: '已结清',
 };
 
 export function badgeClass(status: string) {
-  if (['paid', 'signed', 'approved', 'resolved', 'arrived', 'completed', 'produced', 'done', 'active'].includes(status)) return 'green';
-  if (['hold', 'wrong_claim', 'missing', 'rejected', 'cancelled', 'transferred', 'overdue', 'shipped'].includes(status)) return status === 'shipped' ? 'amber' : 'red';
-  if (['confirmed', 'open', 'requested', 'in_production', 'part_shipped', 'issued', 'processing', 'pending', 'planned', 'returned', 'reshipped'].includes(status)) return 'amber';
-  if (['draft', 'graduated'].includes(status)) return 'gray';
+  if (['paid', 'signed', 'approved', 'resolved', 'arrived', 'completed', 'produced', 'done', 'active', 'closed', 'settled'].includes(status)) return 'green';
+  if (['hold', 'wrong_claim', 'missing', 'rejected', 'cancelled', 'transferred', 'overdue', 'frozen', 'mixed', 'wrong_pack_overdue', 'wrong_pack_mix'].includes(status)) return 'red';
+  if (['confirmed', 'open', 'requested', 'in_production', 'part_shipped', 'issued', 'processing', 'pending', 'planned', 'returned', 'reshipped', 'to_check', 'to_repack', 'resending', 'affected', 'priority_resend', 'acknowledged', 'scanned', 'repacked'].includes(status)) return 'amber';
+  if (['draft', 'graduated', 'excluded', 'defer_release'].includes(status)) return 'gray';
   return 'blue';
 }

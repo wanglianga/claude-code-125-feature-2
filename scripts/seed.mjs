@@ -273,6 +273,7 @@ for (const [oid, sizes] of [
   if (sizes.shoes) pushBatch(oid, iShoes, sizes.shoes[0]);
 }
 await mkBatch('PB20260001', p1, '春秋统一采购第一批（已缴费订单）', '2026-10-20', batch1Lines);
+const batch1Id = (await conn.query('SELECT id FROM production_batches WHERE batch_no=?', ['PB20260001']))[0][0].id;
 
 // 毕业班补订批次：仍在计划中（供应商明确不可投产的订单之外，这批刚建）
 const bid2 = await ins('production_batches', {
@@ -326,6 +327,132 @@ await ins('supplier_assessments', {
   missing_count: 2, delay_count: 1, allergy_count: 0, exchange_count: 6,
   note: '整体履约良好，存在2件漏发与1次批次延期，已整改', assessed_by: zw,
 });
+
+// ---------- 错包混装场景：一(1)班/二(1)班尺码包混装到校 ----------
+// 1) 一批发货到校（陈晓 c11、郑好 c21 的包被混装）
+const shMix = await ins('shipments', {
+  shipment_no: 'SH2026101801', batch_id: batch1Id, carrier: '顺达物流', tracking_no: 'SF-MIX-01',
+  shipped_at: '2026-10-16 09:00:00', expected_arrival: '2026-10-18', status: 'arrived',
+});
+const chenTopOi = await oiOf(oChen, iTop);
+const chenCoatOi = await oiOf(oChen, iCoat);
+const chenPantsOi = await oiOf(oChen, iPants);
+const mzTopOi = await oiOf(oZheng, iTop);
+const zhengCoatOi = await oiOf(oZheng, iCoat);
+const sunTopOi = await oiOf(oSun, iTop);
+const sunPantsOi = await oiOf(oSun, iPants);
+const maTopOi = await oiOf(oMa, iFormalTop);
+// 陈晓长裤同尺码(130)到校但尚未发放：为孙朵朵补发超时提供"他班余量替代调拨"依据
+for (const oi of [chenTopOi, chenCoatOi, mzTopOi, zhengCoatOi, chenPantsOi]) {
+  await ins('shipment_lines', { shipment_id: shMix, order_item_id: oi, qty: 1, arrived_qty: 1, missing_qty: 0 });
+  await conn.query('UPDATE order_items SET shipped_qty=shipped_qty+1 WHERE id=?', [oi]);
+}
+
+// 2) 两个包装码：标签一(1)班的包里混进二(1)班外套；标签二(1)班的包里混进一(1)班外套
+const pack1 = await ins('pack_codes', {
+  pack_code: 'PK-MD-1001', shipment_id: shMix, batch_id: batch1Id, class_id: c11, plan_id: p1, status: 'frozen',
+});
+await ins('pack_items', { pack_code_id: pack1, order_item_id: chenTopOi, expected_class_id: c11, actual_class_id: c11, mismatch: 0 });
+await ins('pack_items', { pack_code_id: pack1, order_item_id: zhengCoatOi, expected_class_id: c21, actual_class_id: c11, mismatch: 1 });
+const pack2 = await ins('pack_codes', {
+  pack_code: 'PK-MD-1002', shipment_id: shMix, batch_id: batch1Id, class_id: c21, plan_id: p1, status: 'frozen',
+});
+await ins('pack_items', { pack_code_id: pack2, order_item_id: mzTopOi, expected_class_id: c21, actual_class_id: c21, mismatch: 0 });
+await ins('pack_items', { pack_code_id: pack2, order_item_id: chenCoatOi, expected_class_id: c11, actual_class_id: c21, mismatch: 1 });
+// 发放现场 PK-MD-1001 被重复扫描
+await ins('pack_scans', { pack_code_id: pack1, scanner_user_id: wangls, scanner_name: '班主任王老师', scanned_at: '2026-10-19 09:05:00', duplicate: 0, note: '首扫' });
+await ins('pack_scans', { pack_code_id: pack1, scanner_user_id: wangls, scanner_name: '班主任王老师', scanned_at: '2026-10-19 09:21:00', duplicate: 1, note: '二(1)班也扫到同一包装码，疑似混装' });
+
+// 3) 三个班的发放场：涉事两班冻结，无关的六(1)班正常
+const distC11 = await ins('distributions', {
+  plan_id: p1, class_id: c11, campus_id: campus1, name: '一(1)班秋季校服发放场', kind: 'regular',
+  scheduled_at: '2026-10-19 15:00:00', location: '一(1)班教室', status: 'in_progress', frozen: 1,
+  freeze_reason: '错包 WP20260001 待核对，暂停本班发放（无关班级不受影响）', created_by: zw,
+});
+const distC21 = await ins('distributions', {
+  plan_id: p1, class_id: c21, campus_id: campus1, name: '二(1)班秋季校服发放场', kind: 'regular',
+  scheduled_at: '2026-10-19 15:30:00', location: '二(1)班教室', status: 'in_progress', frozen: 1,
+  freeze_reason: '错包 WP20260001 待核对，暂停本班发放（无关班级不受影响）', created_by: zw,
+});
+const distC61 = await ins('distributions', {
+  plan_id: p2, class_id: c61, campus_id: campus2, name: '六(1)班毕业礼服发放场（无关班级）', kind: 'regular',
+  scheduled_at: '2026-10-21 10:00:00', location: '知行校区报告厅', status: 'planned', frozen: 0, created_by: zw,
+});
+
+// 陈晓的上衣在发现错包前已实际签收（不能重复发放）
+await ins('receipts', {
+  distribution_id: distC11, order_item_id: chenTopOi, student_id: s_chen, qty: 1, status: 'signed',
+  signed_by: '陈晓妈妈', reason: null, handled: 1, issued_at: '2026-10-19 15:05:00', signed_at: '2026-10-19 15:06:00',
+});
+await conn.query('UPDATE order_items SET signed_qty=signed_qty+1 WHERE id=?', [chenTopOi]);
+
+// 4) 错包工单1：待重新分拣（总务已审核优先补发；已签收的陈晓上衣排除）
+const wp1 = await ins('wrong_pack_cases', {
+  case_no: 'WP20260001', plan_id: p1, campus_id: campus1, supplier_id: supplier, shipment_id: shMix, batch_id: batch1Id,
+  title: '一(1)班/二(1)班尺码包混装（4件，陈晓上衣已签收）', status: 'to_repack',
+  trigger_reason: 'duplicate_scan', description: '两包校服在供应商分拣线混装，PK-MD-1001 被两个班级重复扫描发现',
+  review_decision: 'priority_resend', reviewed_by: zw, reviewed_at: '2026-10-19 16:00:00',
+  review_note: '优先补发受影响三件，已签收的陈晓上衣不重复发放', created_by: zw,
+});
+const wpi = (caseId, student, oi, cls, extra = {}) =>
+  ins('wrong_pack_items', { case_id: caseId, student_id: student, order_item_id: oi, class_id: cls, ...extra });
+await wpi(wp1, s_chen, chenTopOi, c11, { pack_code_id: pack1, already_signed: 1, item_status: 'excluded', exclude_reason: '该生已实际签收，不纳入补发，避免重复发放' });
+await wpi(wp1, s_chen, chenCoatOi, c11, { pack_code_id: pack2, item_status: 'affected' });
+await wpi(wp1, s_zheng, mzTopOi, c21, { pack_code_id: pack2, item_status: 'affected' });
+await wpi(wp1, s_zheng, zhengCoatOi, c21, { pack_code_id: pack1, item_status: 'affected' });
+for (const [d, cls] of [[distC11, c11], [distC21, c21]]) {
+  await ins('wrong_pack_freezes', { case_id: wp1, distribution_id: d, class_id: cls, reason: '错包 WP20260001：两班尺码包混装', frozen_by: zw });
+}
+for (const [action, actor, detail] of [
+  ['登记错包', { role: 'general_affairs', name: '总务赵主任' }, '触发：同一包装码重复扫描；受影响 4 件，已签收 1 件；冻结 2 个本班发放批次'],
+  ['总务审核名单', { role: 'general_affairs', name: '总务赵主任' }, '决定优先补发：陈晓上衣已签收排除'],
+]) {
+  await ins('wrong_pack_logs', { case_id: wp1, actor_role: actor.role, actor_name: actor.name, action, detail });
+}
+
+// 5) 错包工单2：补发中且已超时（首次打开错包列表时系统自动生成追责单+替代调拨建议）
+const wp2 = await ins('wrong_pack_cases', {
+  case_no: 'WP20260002', plan_id: p1, campus_id: campus1, supplier_id: supplier, shipment_id: shMix, batch_id: batch1Id,
+  title: '二(1)班孙朵朵两件混装错包，补发再次超时', status: 'resending', trigger_reason: 'mixed_pack',
+  description: '混装包重新分拣后补发，预计9月25日到校，至今未闭环',
+  review_decision: 'priority_resend', reviewed_by: zw, reviewed_at: '2026-09-20 11:00:00',
+  repack_operator: '仓库分拣 王军', original_pack_destination: '退回供应商仓库重新分拣', repacked_at: '2026-09-21 10:00:00',
+  resend_tracking_no: 'RS2026092101', resend_expected_arrival: '2026-09-25', resend_shipped_at: '2026-09-21 14:00:00',
+  resend_overdue: 0, created_by: zw,
+});
+await wpi(wp2, s_sun, sunTopOi, c21, { item_status: 'resending', resend_tracking_no: 'RS2026092101' });
+await wpi(wp2, s_sun, sunPantsOi, c21, { item_status: 'resending', resend_tracking_no: 'RS2026092101' });
+await ins('wrong_pack_freezes', { case_id: wp2, distribution_id: distC21, class_id: c21, reason: '错包 WP20260002 补发中', frozen_by: zw });
+for (const [action, role, name, detail] of [
+  ['登记错包', 'general_affairs', '总务赵主任', '两班混装定位到孙朵朵2件'],
+  ['总务审核名单', 'general_affairs', '总务赵主任', '决定优先补发'],
+  ['供应商重新分拣登记', 'supplier', '仓库分拣 王军', '操作人：王军；原包去向：退回供应商仓库重新分拣；补发单号 RS2026092101，预计 2026-09-25 到校'],
+]) {
+  await ins('wrong_pack_logs', { case_id: wp2, actor_role: role, actor_name: name, action, detail });
+}
+
+// 6) 错包工单3：已闭环（六(1)班无关批次，双签完成后已解冻）
+const wp3 = await ins('wrong_pack_cases', {
+  case_no: 'WP20260003', plan_id: p2, campus_id: campus2, supplier_id: supplier,
+  title: '六(1)班毕业礼服混装（已闭环示例）', status: 'closed', trigger_reason: 'class_signoff_mismatch',
+  description: '签收核对发现标签错误，现场对调原包解决', review_decision: 'defer_release',
+  reviewed_by: zw, reviewed_at: '2026-10-12 09:00:00', repack_operator: '驻校联络员 刘洋',
+  original_pack_destination: '与另一混装包现场对调', repacked_at: '2026-10-12 10:00:00',
+  student_signed_by: '马奔爸爸', student_signed_at: '2026-10-12 15:10:00',
+  teacher_reviewed_by: qianls, teacher_reviewed_at: '2026-10-12 15:20:00', closed_at: '2026-10-12 15:20:00', created_by: zw,
+});
+await wpi(wp3, s_ma, maTopOi, c61, { item_status: 'closed', student_signed_by: '马奔爸爸', student_signed_at: '2026-10-12 15:10:00', teacher_reviewed_at: '2026-10-12 15:20:00' });
+await ins('wrong_pack_freezes', { case_id: wp3, distribution_id: distC61, class_id: c61, reason: '错包 WP20260003 签收核对', frozen_by: zw, unfrozen: 1, unfrozen_at: '2026-10-12 15:20:00' });
+for (const [action, role, name] of [
+  ['登记错包', 'general_affairs', '总务赵主任'],
+  ['总务审核名单', 'general_affairs', '总务赵主任'],
+  ['供应商重新分拣登记', 'supplier', '驻校联络员 刘洋'],
+  ['学生实际签收', 'head_teacher', '班主任钱老师'],
+  ['班主任复核', 'head_teacher', '班主任钱老师'],
+  ['错包闭环', 'head_teacher', '班主任钱老师'],
+]) {
+  await ins('wrong_pack_logs', { case_id: wp3, actor_role: role, actor_name: name, action, detail: '双签完成，相关发放批次已解冻' });
+}
 
 // ---------- 时间线 ----------
 await log({ role: 'general_affairs', name: '总务赵主任' }, '创建统一采购计划', '两校区2026学年度春秋校服统一采购');

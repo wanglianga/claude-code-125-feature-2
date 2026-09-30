@@ -9,11 +9,13 @@ export default function DistributionDetailPage() {
   const { id } = useParams();
   const [d, setD] = useState<any>(null);
   const [wrongFor, setWrongFor] = useState<any>(null);
+  const [showScan, setShowScan] = useState(false);
   const { show, node } = useToast();
   const load = () => api(`/api/distributions/${id}`).then(setD);
   useEffect(() => { load(); }, [id]);
   if (!d) return <div className="empty">加载中…</div>;
   const dist = d.distribution;
+  const frozen = !!dist.frozen;
 
   async function act(body: any, okMsg = '操作成功') {
     try {
@@ -31,9 +33,20 @@ export default function DistributionDetailPage() {
       </div>
       <p className="muted">{dist.class_name} · {dist.scheduled_at} · {dist.location}</p>
 
+      {frozen && (
+        <div className="card" style={{ borderColor: 'var(--red)', background: '#fff8f8' }}>
+          <h2 style={{ color: 'var(--red)' }}>⛔ 本班发放批次已冻结</h2>
+          <p>{dist.freeze_reason}</p>
+          <p className="muted">冻结仅针对本发放批次（本班），<b>无关班级可继续发放</b>；缺失包补齐、学生签收并经班主任复核闭环后自动解冻。</p>
+          <Link className="btn secondary sm" href="/wrong-packs">前往错包处理 ›</Link>
+        </div>
+      )}
+
       <div className="card row">
-        {dist.status === 'planned' && <button className="btn" onClick={() => act({ action: 'set_status', status: 'in_progress' })}>开始发放</button>}
-        {dist.status === 'in_progress' && <button className="btn" onClick={() => act({ action: 'set_status', status: 'done' }, '本场发放已结束')}>结束本场</button>}
+        {dist.status === 'planned' && !frozen && <button className="btn" onClick={() => act({ action: 'set_status', status: 'in_progress' })}>开始发放</button>}
+        {dist.status === 'in_progress' && !frozen && <button className="btn" onClick={() => act({ action: 'set_status', status: 'done' }, '本场发放已结束')}>结束本场</button>}
+        {frozen && <span style={{ color: 'var(--red)' }}>冻结期间不能开始/结束发放或登记签收</span>}
+        <button className="btn gray sm" onClick={() => setShowScan(true)}>扫描包装码核验</button>
         <span className="muted">正常发放即登记并视为签收；错领、缺件需登记异常，后续安排补领场闭环。</span>
       </div>
 
@@ -72,9 +85,9 @@ export default function DistributionDetailPage() {
                 <td>{c.item_name}</td><td>{c.size}</td>
                 <td>{c.arrived_qty - c.already_issued}</td>
                 <td className="row" style={{ gap: 4 }}>
-                  <button className="btn sm" onClick={() => act({ action: 'issue', order_item_id: c.order_item_id, status: 'issued' }, '已发放并签收')}>正常发放</button>
-                  <button className="btn danger sm" onClick={() => act({ action: 'issue', order_item_id: c.order_item_id, status: 'missing', reason: '包裹内缺件' }, '已登记缺件，等待补发')}>缺件未发</button>
-                  <button className="btn secondary sm" onClick={() => setWrongFor(c)}>班级错领</button>
+                  <button className="btn sm" disabled={frozen} onClick={() => act({ action: 'issue', order_item_id: c.order_item_id, status: 'issued' }, '已发放并签收')}>正常发放</button>
+                  <button className="btn danger sm" disabled={frozen} onClick={() => act({ action: 'issue', order_item_id: c.order_item_id, status: 'missing', reason: '包裹内缺件' }, '已登记缺件，等待补发')}>缺件未发</button>
+                  <button className="btn secondary sm" disabled={frozen} onClick={() => setWrongFor(c)}>班级错领</button>
                 </td>
               </tr>
             ))}
@@ -89,6 +102,43 @@ export default function DistributionDetailPage() {
           await act({ action: 'issue', order_item_id: wrongFor.order_item_id, status: 'wrong_claim', claimant_student_id: claimantId, reason: '发放现场发现被其他班/同学错领' }, '错领已登记，将发起找回或补发');
           setWrongFor(null);
         }} />}
+
+      {showScan && <ScanPackModal distributionId={Number(id)} onClose={() => setShowScan(false)} onDone={(dup) => { setShowScan(false); show(dup ? '该包装码为重复扫描，请立即登记错包并冻结相关批次' : '扫码核验通过'); }} />}
+    </div>
+  );
+}
+
+function ScanPackModal({ distributionId, onClose, onDone }: { distributionId: number; onClose: () => void; onDone: (duplicate: boolean) => void }) {
+  const [packs, setPacks] = useState<any[]>([]);
+  const [q, setQ] = useState('');
+  const { show, node } = useToast();
+  useEffect(() => { api('/api/pack-codes').then((d) => setPacks(d.packs)); }, []);
+  const list = packs.filter((p) => !q || p.pack_code.includes(q));
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        {node}
+        <h3>扫描包装码核验 · 发放场 #{distributionId}</h3>
+        <input className="mono" placeholder="输入/扫描包装码" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: '100%', marginBottom: 8 }} />
+        <div style={{ maxHeight: 320, overflow: 'auto' }}>
+          {list.slice(0, 50).map((p) => (
+            <div key={p.id} className="spread" style={{ padding: '6px 2px', borderBottom: '1px solid var(--line)' }}>
+              <span>
+                <span className="mono">{p.pack_code}</span> {p.class_name || ''}
+                {p.mismatch_cnt > 0 && <span style={{ color: 'var(--red)' }}> ⚠混装{p.mismatch_cnt}件</span>}
+                {p.dup_cnt > 0 && <span style={{ color: 'var(--red)' }}> ⚠已重复扫描{p.dup_cnt}次</span>}
+              </span>
+              <button className="btn sm" onClick={async () => {
+                try {
+                  const r = await api(`/api/pack-codes/${p.id}`, { method: 'POST', body: JSON.stringify({ id: p.id, distribution_id: distributionId }) });
+                  onDone(r.duplicate);
+                } catch (e: any) { show(e.message, true); }
+              }}>扫码</button>
+            </div>
+          ))}
+          {!list.length && <div className="empty">无匹配包装码</div>}
+        </div>
+      </div>
     </div>
   );
 }

@@ -24,7 +24,7 @@ export const GET = api(async (_req: NextRequest, _b: any, user, ctx) => {
     if (st?.parent_user_id !== user.id) return fail('无权限', 403);
   }
 
-  const [items, cases, logs, fr] = await Promise.all([
+  const [items, cases, logs, fr, wrongPacks] = await Promise.all([
     query(
       `SELECT oi.*,
         (SELECT GROUP_CONCAT(CONCAT(pb.batch_no,':',ba.qty) SEPARATOR ';')
@@ -44,9 +44,19 @@ export const GET = api(async (_req: NextRequest, _b: any, user, ctx) => {
     one<any>(
       `SELECT fr.* FROM fitting_records fr JOIN fitting_sessions fs ON fs.id=fr.session_id
        WHERE fr.student_id=? AND fs.plan_id=? ORDER BY fr.id DESC LIMIT 1`, [o.student_id, o.plan_id]),
+    query(
+      `SELECT wpi.id wpi_id, wpi.item_status, wpi.already_signed, wpi.student_signed_at, wpi.teacher_reviewed_at,
+              wpc.case_no, wpc.status wp_status, wpc.review_decision, wpc.resend_tracking_no,
+              wpc.resend_expected_arrival, wpc.resend_arrived_at, wpc.resend_overdue,
+              wpc.transfer_suggestion, wpc.accountability_no, oi.name item_name, oi.size
+         FROM wrong_pack_items wpi
+         JOIN wrong_pack_cases wpc ON wpc.id=wpi.case_id
+         JOIN order_items oi ON oi.id=wpi.order_item_id
+        WHERE wpi.case_id IN (SELECT id FROM wrong_pack_cases WHERE plan_id=?)
+          AND wpi.student_id=? ORDER BY wpc.id`, [o.plan_id, o.student_id]),
   ]);
 
-  return ok({ order: o, items, cases, logs, fitting: fr });
+  return ok({ order: o, items, cases, logs, fitting: fr, wrongPacks });
 });
 
 // 修改明细尺码（家长确认前）

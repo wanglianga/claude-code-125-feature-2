@@ -42,7 +42,15 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
               WHERE o2.student_id=s.id ${planId ? 'AND pb.plan_id=?' : ''}) producing_qty,
             (SELECT COALESCE(SUM(oi.signed_qty),0) FROM order_items oi JOIN orders o2 ON o2.id=oi.order_id
               WHERE o2.student_id=s.id ${planId ? 'AND o2.plan_id=?' : ''}) signed_qty,
-            (SELECT COUNT(*) FROM aftersales_cases ac WHERE ac.student_id=s.id AND ac.status IN ('open','processing')) open_cases
+            (SELECT COUNT(*) FROM aftersales_cases ac WHERE ac.student_id=s.id AND ac.status IN ('open','processing')) open_cases,
+            (SELECT COUNT(*) FROM wrong_pack_items wpi
+               JOIN wrong_pack_cases wpc2 ON wpc2.id=wpi.case_id
+              WHERE wpi.student_id=s.id AND wpi.item_status<>'excluded' AND wpc2.status<>'closed') open_wrongpack,
+            (SELECT COUNT(*) FROM wrong_pack_items wpi
+               JOIN wrong_pack_cases wpc2 ON wpc2.id=wpi.case_id
+              WHERE wpi.student_id=s.id AND wpi.item_status<>'excluded'
+                AND wpi.student_signed_at IS NOT NULL AND wpi.teacher_reviewed_at IS NOT NULL
+                AND wpc2.status='closed') closed_wrongpack
        FROM students s
        JOIN classes c ON c.id=s.class_id
        JOIN grades g ON g.id=s.grade_id
@@ -68,7 +76,13 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
             (SELECT COUNT(DISTINCT s2.id) FROM students s2
                JOIN fitting_records fr ON fr.student_id=s2.id
                JOIN fitting_sessions fs ON fs.id=fr.session_id
-              WHERE fs.class_id=c.id ${planId ? 'AND fs.plan_id=?' : ''}) fitted_students
+              WHERE fs.class_id=c.id ${planId ? 'AND fs.plan_id=?' : ''}) fitted_students,
+            (SELECT COUNT(*) FROM distributions d2
+              WHERE d2.class_id=c.id AND d2.frozen=1 ${planId ? 'AND d2.plan_id=?' : ''}) frozen_dists,
+            (SELECT COUNT(*) FROM wrong_pack_items wpi
+               JOIN wrong_pack_cases wpc2 ON wpc2.id=wpi.case_id
+              WHERE wpi.class_id=c.id AND wpi.item_status<>'excluded' AND wpc2.status<>'closed'
+                ${planId ? 'AND wpc2.plan_id=?' : ''}) open_wrongpack
        FROM classes c
        JOIN grades g ON g.id=c.grade_id
        JOIN campuses cp ON cp.id=g.campus_id
@@ -76,7 +90,7 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
        LEFT JOIN orders o ON o.student_id=s.id ${planId ? 'AND o.plan_id=?' : ''}
        ${cWhere.length ? 'WHERE ' + cWhere.join(' AND ') : ''}
        GROUP BY c.id ORDER BY cp.id, g.id, c.id`,
-    [...(planId ? [planId, planId] : []), ...cArgs]);
+    [...(planId ? [planId, planId, planId, planId] : []), ...cArgs]);
 
   return ok({ students: studentRows, classes: classRows });
 });

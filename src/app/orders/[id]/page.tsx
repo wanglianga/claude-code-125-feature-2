@@ -99,6 +99,31 @@ export default function OrderDetailPage() {
         </table>
       </div>
 
+      {d.wrongPacks?.length > 0 && (
+        <div className="card">
+          <h2>错包补发状态（家长端）</h2>
+          <table>
+            <thead><tr><th>错包单号</th><th>品类</th><th>尺码</th><th>补发单号/预计到校</th><th>处理状态</th><th>学生签收</th><th>班主任复核</th><th>说明</th></tr></thead>
+            <tbody>
+              {d.wrongPacks.map((w: any) => (
+                <tr key={w.wpi_id}>
+                  <td className="mono">{w.case_no}</td><td>{w.item_name}</td><td>{w.size}</td>
+                  <td>{w.resend_tracking_no ? <span className="mono">{w.resend_tracking_no}</span> : <span className="muted">待供应商登记</span>}
+                    {w.resend_expected_arrival ? ` / 预计 ${w.resend_expected_arrival}` : ''}</td>
+                  <td><Badge status={w.wp_status} />{w.resend_overdue && <span className="tag-chip" style={{ marginLeft: 4 }}>已超时，平台追责中</span>}</td>
+                  <td>{w.student_signed_at ? <Badge status="signed" /> : <span className="muted">待签收</span>}</td>
+                  <td>{w.teacher_reviewed_at ? <span style={{ color: 'var(--green)' }}>已复核</span> : <span className="muted">待复核</span>}</td>
+                  <td className="muted" style={{ fontSize: 11 }}>
+                    {w.already_signed ? '该件此前已签收，不重复发放' : ''}
+                    {w.resend_overdue ? w.transfer_suggestion : ''}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       <div className="card">
         <h2>关联售后工单</h2>
         {d.cases.length ? (
