@@ -32,6 +32,11 @@ export default function DistributionDetailPage() {
       <p className="muted">{dist.class_name} · {dist.scheduled_at} · {dist.location}</p>
 
       <div className="card row">
+        {dist.status === 'frozen' && (
+          <span style={{ color: 'var(--red)', fontWeight: 700 }}>
+            ⛔ 本场次因错包事件已冻结：缺失包补齐并双签闭环后自动解冻；无关班级场次不受影响，可继续发放。
+          </span>
+        )}
         {dist.status === 'planned' && <button className="btn" onClick={() => act({ action: 'set_status', status: 'in_progress' })}>开始发放</button>}
         {dist.status === 'in_progress' && <button className="btn" onClick={() => act({ action: 'set_status', status: 'done' }, '本场发放已结束')}>结束本场</button>}
         <span className="muted">正常发放即登记并视为签收；错领、缺件需登记异常，后续安排补领场闭环。</span>

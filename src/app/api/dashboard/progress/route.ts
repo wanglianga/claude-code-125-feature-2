@@ -42,7 +42,13 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
               WHERE o2.student_id=s.id ${planId ? 'AND pb.plan_id=?' : ''}) producing_qty,
             (SELECT COALESCE(SUM(oi.signed_qty),0) FROM order_items oi JOIN orders o2 ON o2.id=oi.order_id
               WHERE o2.student_id=s.id ${planId ? 'AND o2.plan_id=?' : ''}) signed_qty,
-            (SELECT COUNT(*) FROM aftersales_cases ac WHERE ac.student_id=s.id AND ac.status IN ('open','processing')) open_cases
+            (SELECT COUNT(*) FROM aftersales_cases ac WHERE ac.student_id=s.id AND ac.status IN ('open','processing')) open_cases,
+            (SELECT COUNT(*) FROM mispack_items mi
+               JOIN mispack_events me ON me.id=mi.event_id
+              WHERE mi.student_id=s.id AND me.status<>'closed') open_mispack,
+            (SELECT COALESCE(SUM(mi.already_signed=0 AND (mi.student_signed=0 OR mi.teacher_reviewed=0)),0)
+               FROM mispack_items mi JOIN mispack_events me ON me.id=mi.event_id
+              WHERE mi.student_id=s.id AND me.status<>'closed' AND mi.disposition='resend') mispack_wait
        FROM students s
        JOIN classes c ON c.id=s.class_id
        JOIN grades g ON g.id=s.grade_id
@@ -68,7 +74,16 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
             (SELECT COUNT(DISTINCT s2.id) FROM students s2
                JOIN fitting_records fr ON fr.student_id=s2.id
                JOIN fitting_sessions fs ON fs.id=fr.session_id
-              WHERE fs.class_id=c.id ${planId ? 'AND fs.plan_id=?' : ''}) fitted_students
+              WHERE fs.class_id=c.id ${planId ? 'AND fs.plan_id=?' : ''}) fitted_students,
+            (SELECT COUNT(*) FROM distributions d2
+              WHERE d2.class_id=c.id AND d2.status='frozen') frozen_dist_cnt,
+            (SELECT COUNT(DISTINCT me.id) FROM mispack_items mi2
+               JOIN mispack_events me ON me.id=mi2.event_id
+              WHERE mi2.class_id=c.id AND me.status<>'closed') open_mispack_cnt,
+            (SELECT COALESCE(SUM(mi2.already_signed=0 AND (mi2.student_signed=0 OR mi2.teacher_reviewed=0)),0)
+               FROM mispack_items mi2 JOIN mispack_events me ON me.id=mi2.event_id
+              WHERE mi2.class_id=c.id AND me.status<>'closed'
+                AND mi2.disposition='resend') mispack_pending_cnt
        FROM classes c
        JOIN grades g ON g.id=c.grade_id
        JOIN campuses cp ON cp.id=g.campus_id

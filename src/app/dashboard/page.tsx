@@ -39,9 +39,9 @@ export default function DashboardPage() {
       </div>
 
       <div className="card">
-        <h2>按班级汇总（缴费 · 试穿）</h2>
+        <h2>按班级汇总（缴费 · 试穿 · 错包冻结）</h2>
         <table>
-          <thead><tr><th>校区</th><th>年级</th><th>班级</th><th>学生数</th><th>订单数</th><th>已缴费</th><th>待缴费/挂起</th><th>已试穿人数</th></tr></thead>
+          <thead><tr><th>校区</th><th>年级</th><th>班级</th><th>学生数</th><th>订单数</th><th>已缴费</th><th>待缴费/挂起</th><th>已试穿人数</th><th>冻结场次</th><th>错包待补发</th></tr></thead>
           <tbody>
             {data.classes?.map((c: any) => (
               <tr key={c.id}>
@@ -50,6 +50,10 @@ export default function DashboardPage() {
                 <td><Badge status="paid" /> {c.paid_cnt}</td>
                 <td>{Number(c.pending_cnt) > 0 ? <span style={{ color: 'var(--amber)' }}>{c.pending_cnt}</span> : 0}</td>
                 <td>{c.fitted_students}</td>
+                <td>{Number(c.frozen_dist_cnt) > 0 ? <Badge status="frozen" /> : <span className="muted">—</span>}</td>
+                <td>{Number(c.open_mispack_cnt) > 0
+                  ? <span><Badge status="pending_check" /> {c.mispack_pending_cnt} 件待双签</span>
+                  : <span className="muted">—</span>}</td>
               </tr>
             ))}
           </tbody>
@@ -61,7 +65,7 @@ export default function DashboardPage() {
         <table>
           <thead><tr>
             <th>学号</th><th>学生</th><th>班级</th><th>在校状态</th><th>订单</th>
-            <th>缴费</th><th>试穿</th><th>已投产(件)</th><th>已签收(件)</th><th>进行中售后</th>
+            <th>缴费</th><th>试穿</th><th>已投产(件)</th><th>已签收(件)</th><th>进行中售后</th><th>错包/补发状态</th>
           </tr></thead>
           <tbody>
             {s.map((x: any) => (
@@ -81,6 +85,11 @@ export default function DashboardPage() {
                 <td>{x.producing_qty}</td>
                 <td>{x.signed_qty}</td>
                 <td>{x.open_cases > 0 ? <Badge status="open" /> : <span className="muted">—</span>}</td>
+                <td>{x.open_mispack > 0
+                  ? (x.mispack_wait > 0
+                    ? <span><Badge status="resending" /> 待补发 {x.mispack_wait}</span>
+                    : <span className="muted">错包涉事·已签收不受影响</span>)
+                  : <span className="muted">—</span>}</td>
               </tr>
             ))}
           </tbody>

@@ -272,6 +272,177 @@ const find = (arr, pred) => { const r = arr.find(pred); if (!r) throw new Error(
   const classRow = find(r.classes, (x) => x.class_name === '一(1)班');
   check('班级汇总存在', classRow.students >= 4);
 
+  // 12. 错包处理与批次可追溯（两班尺码包混装）
+  console.log('⑫ 错包：重复扫码定位/按批次冻结/四状态/双签闭环/超时追责');
+  await login('zw');
+  r = await req('GET', '/api/mispacks');
+  const mp = find(r.events, (x) => x.event_no === 'MP20261001');
+  check('错包事件定位5件：2件已签收/3件缺包',
+    mp.affected_cnt === 5 && Number(mp.signed_cnt) === 2 && Number(mp.short_cnt) === 3, JSON.stringify({ a: mp.affected_cnt, s: mp.signed_cnt, h: mp.short_cnt }));
+  check('冻结2个涉事班级发放场次（非整校停发）', Number(mp.frozen_cnt) === 2);
+  let mpd = await req('GET', `/api/mispacks/${mp.id}`);
+  const miChenPants = find(mpd.items, (x) => x.student_name === '陈晓' && x.item_name === '春秋运动长裤');
+  const miChenCoat = find(mpd.items, (x) => x.student_name === '陈晓' && x.item_name === '礼服外套');
+  const miZhengPants = find(mpd.items, (x) => x.student_name === '郑好' && x.item_name === '春秋运动长裤');
+  const miChenTop = find(mpd.items, (x) => x.student_name === '陈晓' && x.item_name === '春秋运动上衣');
+  check('已签收学生标记防重复发放', miChenTop.already_signed === 1);
+  const frozenA = find(mpd.frozen, (x) => x.class_name === '一(1)班');
+  const frozenB = find(mpd.frozen, (x) => x.class_name === '二(1)班');
+
+  // 无关班级（知行六1班）场次不冻结、可继续发放
+  let dists = (await req('GET', '/api/distributions')).distributions;
+  const unrelated = find(dists, (x) => x.name.includes('六(1)班毕业礼服'));
+  check('无关班级场次未被冻结', unrelated.status === 'planned');
+  await req('POST', `/api/distributions/${unrelated.id}`, { distribution_id: unrelated.id, action: 'set_status', status: 'in_progress' });
+  check('无关班级可继续发放', true);
+
+  // 冻结场次不能发放/整批确认
+  let frozenErr = '';
+  try {
+    await req('POST', `/api/distributions/${frozenA.distribution_id}`, { distribution_id: frozenA.distribution_id, action: 'set_status', status: 'done' });
+  } catch (e) { frozenErr = e.message; }
+  check('冻结场次禁止确认整批发放', frozenErr.includes('冻结'), frozenErr);
+
+  // 看板反映冻结
+  r = await req('GET', `/api/dashboard/progress?plan_id=${p1.id}`);
+  const c11row = find(r.classes, (x) => x.class_name === '一(1)班');
+  check('看板显示冻结场次与未闭环错包', Number(c11row.frozen_dist_cnt) >= 1 && Number(c11row.open_mispack_cnt) === 1, JSON.stringify(c11row));
+
+  // 角色可见性：家长只看自己孩子相关事件
+  await login('chen_ma');
+  r = await req('GET', '/api/mispacks');
+  check('家长端可看到孩子的错包补发状态', r.events.some((x) => x.id === mp.id));
+  mpd = await req('GET', `/api/mispacks/${mp.id}`);
+
+  // 未审核不能转分拣；已签收件不能再签收/找回
+  await login('zw');
+  let chkErr = '';
+  try { await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'confirm_check' }); } catch (e) { chkErr = e.message; }
+  check('未审核不能完成核对', chkErr.includes('审核'));
+  let signErr = '';
+  try { await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'student_sign', item_id: miChenTop.id }); } catch (e) { signErr = e.message; }
+  check('已签收学生不能被重复发放', signErr.includes('已签收'), signErr);
+
+  // 总务审核：优先补发 → 核对完成 → 待重新分拣
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'review', decision: 'priority_resend', note: '优先补发一年级' });
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'confirm_check' });
+  mpd = await req('GET', `/api/mispacks/${mp.id}`);
+  check('状态：待核对→待重新分拣', mpd.event.status === 'to_resort');
+
+  // 供应商重新分拣登记（操作人/原包去向/补发单号/预计到校），预计时间给过去以触发再次超时
+  await login('gys');
+  let resortErr = '';
+  try {
+    await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'resort', sort_operator: '仓管员周强' });
+  } catch (e) { resortErr = e.message; }
+  check('分拣登记缺字段被拦截', resortErr.includes('原包去向'), resortErr);
+  await req('POST', `/api/mispacks/${mp.id}`, {
+    id: mp.id, action: 'resort', sort_operator: '仓管员周强',
+    original_package_destination: '退回供应商中心仓按班重新分拣',
+    resend_tracking_no: 'SF-RS-9988', expected_arrival: '2026-09-10 12:00:00',
+  });
+  mpd = await req('GET', `/api/mispacks/${mp.id}`);
+  check('状态：待重新分拣→补发中，3名缺包学生生成补发工单',
+    mpd.event.status === 'resending' && mpd.items.filter((x) => x.case_id).length === 3,
+    JSON.stringify(mpd.items.map((x) => x.case_id)));
+
+  // 未到校不能签收
+  await login('wangls');
+  let earlyErr = '';
+  try { await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'student_sign', item_id: miChenPants.id }); } catch (e) { earlyErr = e.message; }
+  check('补发未到校不能签收', earlyErr.includes('到校'), earlyErr);
+
+  // 巡检超时：自动生成供应商追责 + 替代调拨建议
+  await login('zw');
+  r = await req('GET', '/api/mispacks?status=resending');
+  const mpRow = find(r.events, (x) => x.id === mp.id);
+  check('补发再次超时被标记', mpRow.timeout_flag === 1);
+  mpd = await req('GET', `/api/mispacks/${mp.id}`);
+  check('自动生成追责+替代调拨建议各1条',
+    mpd.actions.filter((a) => a.kind === 'accountability').length === 1
+    && mpd.actions.filter((a) => a.kind === 'transfer_suggestion').length === 1);
+  const accAction = find(mpd.actions, (a) => a.kind === 'accountability');
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'handle_action', action_id: accAction.id, decision: 'accepted' });
+
+  // 总务确认补发到校（自动按班级创建补领场）
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'arrive' });
+  mpd = await req('GET', `/api/mispacks/${mp.id}`);
+  check('已确认到校并安排补领场', mpd.event.arrived_at);
+
+  // 双签：学生实际签收 + 班主任复核；跨班教师无权操作
+  await login('wangls');
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'student_sign', item_id: miChenPants.id });
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'student_sign', item_id: miChenCoat.id });
+  let crossErr = '';
+  try {
+    await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'student_sign', item_id: miZhengPants.id });
+  } catch (e) { crossErr = e.message; }
+  check('班主任不能操作其他班学生', crossErr.includes('本班'), crossErr);
+  // 只复核一件，事件不应闭环
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'teacher_review', item_id: miChenPants.id });
+  mpd = await req('GET', `/api/mispacks/${mp.id}`);
+  check('双签未齐不闭环', mpd.event.status === 'resending');
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'teacher_review', item_id: miChenCoat.id });
+
+  // 二(1)班：家长可签收自己孩子，班主任复核
+  await login('zheng_ba');
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'student_sign', item_id: miZhengPants.id });
+  await login('zhaols');
+  await req('POST', `/api/mispacks/${mp.id}`, { id: mp.id, action: 'teacher_review', item_id: miZhengPants.id });
+  mpd = await req('GET', `/api/mispacks/${mp.id}`);
+  check('全部双签后事件自动闭环', mpd.event.status === 'closed');
+  check('双签进度3/3签收 3/3复核', mpd.items.filter((x) => !x.already_signed).every((x) => x.student_signed === 1 && x.teacher_reviewed === 1));
+  const fA = find(mpd.frozen, (x) => x.class_name === '一(1)班');
+  const fB = find(mpd.frozen, (x) => x.class_name === '二(1)班');
+  check('闭环后冻结场次解冻', !!fA.unfrozen_at && !!fB.unfrozen_at);
+  await login('zw');
+  dists = (await req('GET', '/api/distributions')).distributions;
+  const dA = find(dists, (x) => x.id === frozenA.distribution_id);
+  const dB = find(dists, (x) => x.id === frozenB.distribution_id);
+  check('场次恢复冻结前状态（一1进行中/二1已计划）', dA.status === 'in_progress' && dB.status === 'planned', `${dA.status}/${dB.status}`);
+  // 缺包补齐后可以确认整批发放
+  await req('POST', `/api/distributions/${dA.id}`, { distribution_id: dA.id, action: 'set_status', status: 'done' });
+  check('补齐闭环后可确认整批发放', true);
+  // 补发工单全部解决
+  const openResend = mpd.items.filter((x) => x.case_id && x.case_status !== 'resolved');
+  check('补发工单随双签闭环', openResend.length === 0, JSON.stringify(openResend));
+
+  // 看板：错包归零；考核错包数自动统计
+  r = await req('GET', `/api/dashboard/progress?plan_id=${p1.id}`);
+  const c11after = find(r.classes, (x) => x.class_name === '一(1)班');
+  check('闭环后看板冻结/错包清零', Number(c11after.frozen_dist_cnt) === 0 && Number(c11after.open_mispack_cnt) === 0, JSON.stringify(c11after));
+  r = await req('GET', '/api/assessments');
+  check('供应商考核同步错包数', r.assessments.some((a) => Number(a.mispack_count) >= 1), JSON.stringify(r.assessments.map((a) => a.mispack_count)));
+
+  // 重复扫码实时触发：新包装码第二次扫码自动建事件并冻结
+  await login('gys');
+  r = await req('GET', `/api/packages/candidates?plan_id=${p1.id}&class_id=${c11.id}`);
+  const wuTop = find(r.candidates, (c) => c.student_name === '吴磊' && c.item_name === '春秋运动上衣');
+  const code = `PKG-E2E-${Date.now()}`;
+  r = await req('POST', '/api/packages', {
+    package_code: code, plan_id: p1.id,
+    items: [{ order_item_id: wuTop.order_item_id, qty: 1 }],
+  });
+  const newPkg = r.id;
+  await login('zw');
+  r = await req('POST', `/api/packages/${newPkg}`, { id: newPkg, scene: 'arrival' });
+  check('首次扫码正常', r.duplicate === false);
+  r = await req('POST', `/api/packages/${newPkg}`, { id: newPkg, scene: 'arrival' });
+  check('第二次扫码自动触发错包事件并冻结批次', r.duplicate === true && !!r.mispack.eventNo && r.mispack.frozen >= 1, JSON.stringify(r.mispack));
+  const dupId = r.mispack.eventId;
+  mpd = await req('GET', `/api/mispacks/${dupId}`);
+  const only = mpd.items[0];
+  // 原包找回路径：审核→分拣前也可直接登记找回并闭环
+  await req('POST', `/api/mispacks/${dupId}`, { id: dupId, action: 'mark_recovered', item_id: only.id });
+  let closeErr = '';
+  try {
+    // review 决策未做不能 confirm_check，但全部找回可直接闭环
+    await req('POST', `/api/mispacks/${dupId}`, { id: dupId, action: 'close_recovered' });
+  } catch (e) { closeErr = e.message; }
+  check('全部原包找回可直接闭环并解冻', !closeErr, closeErr);
+  mpd = await req('GET', `/api/mispacks/${dupId}`);
+  check('找回事件已闭环', mpd.event.status === 'closed');
+
   console.log(`\n结果：${pass} 通过, ${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch( (e) => { console.error('\n💥 E2E 异常中断:', e.message); process.exit(1); });

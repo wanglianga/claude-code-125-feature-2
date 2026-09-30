@@ -1,9 +1,13 @@
 'use client';
 import { useState, ReactNode } from 'react';
-import { STATUS_LABELS, badgeClass } from '@/lib/types';
+import { STATUS_LABELS, PACKAGE_STATUS_LABELS, badgeClass } from '@/lib/types';
 
 export function Badge({ status }: { status: string }) {
   return <span className={`badge ${badgeClass(status)}`}>{STATUS_LABELS[status] || status}</span>;
+}
+
+export function PackageBadge({ status }: { status: string }) {
+  return <span className={`badge ${badgeClass(status)}`}>{PACKAGE_STATUS_LABELS[status] || STATUS_LABELS[status] || status}</span>;
 }
 
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {

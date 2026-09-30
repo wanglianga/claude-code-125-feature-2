@@ -42,6 +42,7 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
 
   // 发放一件（可登记为正常/错领/漏发未到）
   if (body.action === 'issue') {
+    if (dist.status === 'frozen') return fail('该发放场次因错包事件已冻结，仅限错包涉及的补发在补领场进行；无关班级场次不受影响');
     const oi = await one<any>(
       `SELECT oi.*, o.student_id, o.class_id, o.id order_id FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.id=?`,
       [body.order_item_id]);
@@ -102,6 +103,18 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
   // 场次状态
   if (body.action === 'set_status') {
     if (!['planned', 'in_progress', 'done'].includes(body.status)) return fail('状态非法');
+    if (dist.status === 'frozen') {
+      if (body.status === 'done') return fail('该场次因错包事件冻结，缺失包补齐并闭环后才能确认整批发放');
+      return fail('该场次已被错包事件冻结，不能手工改状态；事件闭环后自动解冻');
+    }
+    if (body.status === 'done') {
+      // 相关班级存在未闭环错包事件 → 缺失包未补齐前不能确认整批发放
+      const open = await one<any>(
+        `SELECT me.event_no FROM mispack_items mi
+           JOIN mispack_events me ON me.id=mi.event_id
+          WHERE mi.class_id=? AND me.status<>'closed' LIMIT 1`, [dist.class_id]);
+      if (open) return fail(`本班错包事件 ${open.event_no} 尚未闭环，缺失包未补齐前不能确认整批发放`);
+    }
     await query('UPDATE distributions SET status=? WHERE id=?', [body.status, dist.id]);
     return ok();
   }

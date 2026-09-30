@@ -272,7 +272,7 @@ for (const [oid, sizes] of [
   if (sizes.skirt) pushBatch(oid, iSkirt, sizes.skirt[0]);
   if (sizes.shoes) pushBatch(oid, iShoes, sizes.shoes[0]);
 }
-await mkBatch('PB20260001', p1, '春秋统一采购第一批（已缴费订单）', '2026-10-20', batch1Lines);
+const batch1Id = await mkBatch('PB20260001', p1, '春秋统一采购第一批（已缴费订单）', '2026-10-20', batch1Lines);
 
 // 毕业班补订批次：仍在计划中（供应商明确不可投产的订单之外，这批刚建）
 const bid2 = await ins('production_batches', {
@@ -326,6 +326,103 @@ await ins('supplier_assessments', {
   missing_count: 2, delay_count: 1, allergy_count: 0, exchange_count: 6,
   note: '整体履约良好，存在2件漏发与1次批次延期，已整改', assessed_by: zw,
 });
+
+// ---------- 错包处理与批次可追溯：两班尺码包混装 ----------
+// 场景：一(1)班陈晓、二(1)班郑好的部分校服已到校发放；供应商把两个班的尺码包混装到同一包装码，
+// 发放现场重复扫码触发预警；陈晓、郑好已有一件签收（防重复发放），其余缺包待补发；无关班级继续发放。
+{
+  const oiChenTop = await oiOf(oChen, iTop);
+  const oiChenPants = await oiOf(oChen, iPants);
+  const oiChenCoat = await oiOf(oChen, iCoat);
+  const oiZhengTop = await oiOf(oZheng, iTop);
+  const oiZhengPants = await oiOf(oZheng, iPants);
+
+  // 混装校服已随第一批到校
+  const shipMis = await ins('shipments', {
+    shipment_no: 'SH20261001', batch_id: batch1Id, carrier: '顺达物流', tracking_no: 'SF-MIX-01',
+    shipped_at: '2026-10-18 09:00:00', expected_arrival: '2026-10-20', status: 'arrived',
+  });
+  for (const oi of [oiChenTop, oiChenPants, oiChenCoat, oiZhengTop, oiZhengPants]) {
+    await ins('shipment_lines', { shipment_id: shipMis, order_item_id: oi, qty: 1, arrived_qty: 1, missing_qty: 0 });
+  }
+
+  // 正常包装码：PK-A11（一(1)班）、PK-B21（二(1)班）
+  const pkgA = await ins('packages', {
+    package_code: 'PKG-A11-01', plan_id: p1, supplier_id: supplier, shipment_id: shipMis, batch_id: batch1Id,
+    intended_class_id: c11, intended_campus_id: campus1, status: 'merged_flagged', note: '一(1)班包装', packed_by: gys,
+  });
+  await ins('package_items', { package_id: pkgA, order_item_id: oiChenTop, qty: 1 });
+  await ins('package_items', { package_id: pkgA, order_item_id: oiChenPants, qty: 1 });
+  const pkgB = await ins('packages', {
+    package_code: 'PKG-B21-01', plan_id: p1, supplier_id: supplier, shipment_id: shipMis, batch_id: batch1Id,
+    intended_class_id: c21, intended_campus_id: campus1, status: 'merged_flagged', note: '二(1)班包装', packed_by: gys,
+  });
+  await ins('package_items', { package_id: pkgB, order_item_id: oiZhengTop, qty: 1 });
+  // 混装包装码：同时装入一(1)班陈晓外套 和 二(1)班郑好长裤
+  const pkgMix = await ins('packages', {
+    package_code: 'PKG-MIX-88', plan_id: p1, supplier_id: supplier, shipment_id: shipMis, batch_id: batch1Id,
+    intended_class_id: null, intended_campus_id: campus1, status: 'merged_flagged',
+    note: '两班尺码混装包，发放现场被重复扫码发现', packed_by: gys,
+  });
+  await ins('package_items', { package_id: pkgMix, order_item_id: oiChenCoat, qty: 1 });
+  await ins('package_items', { package_id: pkgMix, order_item_id: oiZhengPants, qty: 1 });
+
+  // 发放场次：两班场次被冻结；知行六(1)班（另一计划/无关班级）不受影响可继续发放
+  const distA11 = await ins('distributions', {
+    plan_id: p1, class_id: c11, campus_id: campus1, name: '一(1)班秋季发放场', kind: 'regular',
+    scheduled_at: '2026-10-22 15:00:00', location: '一(1)班教室', status: 'frozen', created_by: wangls,
+  });
+  const distB21 = await ins('distributions', {
+    plan_id: p1, class_id: c21, campus_id: campus1, name: '二(1)班秋季发放场', kind: 'regular',
+    scheduled_at: '2026-10-22 16:00:00', location: '二(1)班教室', status: 'frozen', created_by: zhaols,
+  });
+  await ins('distributions', {
+    plan_id: p2, class_id: c61, campus_id: campus2, name: '六(1)班毕业礼服发放场（无关班级照常）', kind: 'regular',
+    scheduled_at: '2026-10-23 10:00:00', location: '知行校区阶梯教室', status: 'planned', created_by: qianls,
+  });
+
+  // 部分学生已签收：陈晓上衣、郑好上衣（已签收件不再补发）
+  await ins('receipts', {
+    distribution_id: distA11, order_item_id: oiChenTop, student_id: s_chen, qty: 1,
+    status: 'signed', signed_by: '陈晓妈妈', handled: 1, signed_at: '2026-10-22 15:10:00',
+  });
+  await ins('receipts', {
+    distribution_id: distB21, order_item_id: oiZhengTop, student_id: s_zheng, qty: 1,
+    status: 'signed', signed_by: '郑好爸爸', handled: 1, signed_at: '2026-10-22 16:05:00',
+  });
+  await conn.query('UPDATE order_items SET signed_qty=1 WHERE id IN (?)', [[oiChenTop, oiZhengTop]]);
+
+  // 混装包两次扫码（到校 + 发放现场重复扫描）
+  await ins('package_scans', { package_id: pkgMix, scene: 'arrival', scanned_by: zw, scanner_name: '总务赵主任', note: '到校首扫', scanned_at: '2026-10-20 09:30:00' });
+  await ins('package_scans', { package_id: pkgMix, scene: 'distribution', distribution_id: distA11, scanned_by: wangls, scanner_name: '班主任王老师', note: '发放现场再次扫到同一包装码，疑似混装', scanned_at: '2026-10-22 15:20:00' });
+
+  // 错包事件（待核对状态），受影响名单 5 件：2 件已签收、3 件缺包
+  const ev = await ins('mispack_events', {
+    event_no: 'MP20261001', plan_id: p1, supplier_id: supplier, trigger_type: 'duplicate_scan',
+    status: 'pending_check', title: '包装码 PKG-MIX-88 重复扫描：一(1)/二(1)班尺码包混装',
+    description: '发放现场重复扫码，平台依据学生订单、包装码、生产批次、班级签收与未发放清单定位范围',
+    reported_by: zw, review_decision: 'pending',
+  });
+  const miRows = [
+    { student: s_chen, order: oChen, cls: c11, oi: oiChenTop, pkg: pkgA, code: 'PKG-A11-01', name: '春秋运动上衣', size: '130', signed: 1 },
+    { student: s_chen, order: oChen, cls: c11, oi: oiChenPants, pkg: pkgA, code: 'PKG-A11-01', name: '春秋运动长裤', size: '130', signed: 0 },
+    { student: s_chen, order: oChen, cls: c11, oi: oiChenCoat, pkg: pkgMix, code: 'PKG-MIX-88', name: '礼服外套', size: '140', signed: 0 },
+    { student: s_zheng, order: oZheng, cls: c21, oi: oiZhengTop, pkg: pkgB, code: 'PKG-B21-01', name: '春秋运动上衣', size: '150', signed: 1 },
+    { student: s_zheng, order: oZheng, cls: c21, oi: oiZhengPants, pkg: pkgMix, code: 'PKG-MIX-88', name: '春秋运动长裤', size: '150', signed: 0 },
+  ];
+  for (const m of miRows) {
+    await ins('mispack_items', {
+      event_id: ev, student_id: m.student, order_id: m.order, order_item_id: m.oi, class_id: m.cls,
+      package_id: m.pkg, package_code: m.code, batch_no: 'PB20260001', item_name: m.name, size: m.size,
+      qty: 1, already_signed: m.signed, disposition: 'pending',
+    });
+  }
+  await ins('mispack_frozen_distributions', { event_id: ev, distribution_id: distA11, class_id: c11, prev_status: 'in_progress', reason: '错包事件 MP20261001 冻结涉事班级场次' });
+  await ins('mispack_frozen_distributions', { event_id: ev, distribution_id: distB21, class_id: c21, prev_status: 'planned', reason: '错包事件 MP20261001 冻结涉事班级场次' });
+
+  await log({ role: 'general_affairs', name: '总务赵主任' }, '错包预警-重复扫码', 'MP20261001 混装包 PKG-MIX-88 发放现场被重复扫码');
+  await log({ role: 'system', name: '平台' }, '冻结发放批次', 'MP20261001 仅冻结一(1)/二(1)班场次，六(1)班无关场次继续发放');
+}
 
 // ---------- 时间线 ----------
 await log({ role: 'general_affairs', name: '总务赵主任' }, '创建统一采购计划', '两校区2026学年度春秋校服统一采购');
